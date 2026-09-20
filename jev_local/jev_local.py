@@ -26,6 +26,16 @@ DEFAULT_ENDPOINT = os.getenv("JEV_LOCAL_ENDPOINT", "http://localhost:11434")  # 
 DEFAULT_MODEL = os.getenv("JEV_LOCAL_MODEL", "qwen2.5:7b")
 DEFAULT_TIMEOUT = 30.0
 
+
+def _load_saved_api_key() -> str | None:
+    """Load the optional setup key from the user-only config file."""
+    config_file = os.path.expanduser("~/.config/jev-local/config.json")
+    try:
+        with open(config_file, encoding="utf-8") as handle:
+            return json.load(handle).get("api_key") or None
+    except (OSError, ValueError, TypeError):
+        return None
+
 # ─── Schemas ─────────────────────────────────────────────────────────────
 class QuestionSpec(BaseModel):
     type: Literal["choice", "score", "noul"] = "choice"
@@ -92,6 +102,7 @@ class JEVLocal:
         temperature: float = 0.1,
         max_tokens: int = 128,
         backend: Literal["auto", "ollama", "openai"] = "auto",
+        api_key: str | None = None,
     ):
         self.endpoint = endpoint.rstrip("/")
         self.model = model
@@ -99,7 +110,9 @@ class JEVLocal:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.backend = backend
-        self._client = httpx.Client(timeout=timeout, http2=False)
+        self.api_key = api_key or os.getenv("JEV_LOCAL_API_KEY") or _load_saved_api_key()
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        self._client = httpx.Client(timeout=timeout, http2=False, headers=headers)
 
     def _detect_backend(self) -> str:
         """Auto-detect backend from endpoint."""

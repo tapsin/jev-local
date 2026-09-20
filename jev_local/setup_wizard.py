@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import time
+from getpass import getpass
 from pathlib import Path
 
 import httpx
@@ -41,10 +42,30 @@ def print_step(step: int, total: int, title: str):
     print("-" * 40)
 
 
-def fetch_models(base_url: str, provider_type: str) -> list[dict]:
+def auth_headers(api_key: str | None) -> dict[str, str]:
+    """Return an Authorization header without exposing the key."""
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+
+def ask_api_key() -> str | None:
+    """Ask whether the selected endpoint requires an API key."""
+    while True:
+        answer = input("Bu sağlayıcı için API key var mı/gerekli mi? [e/H]: ").strip().lower()
+        if answer in ("", "h", "hayır", "hayir", "n", "no"):
+            return None
+        if answer in ("e", "evet", "y", "yes"):
+            key = getpass("API key (ekranda görünmez): ").strip()
+            if key:
+                return key
+            print("API key boş bırakılamaz.")
+            continue
+        print("Lütfen 'e' veya 'h' girin.")
+
+
+def fetch_models(base_url: str, provider_type: str, api_key: str | None = None) -> list[dict]:
     """Fetch available models from provider API."""
     try:
-        with httpx.Client(timeout=10.0) as client:
+        with httpx.Client(timeout=10.0, headers=auth_headers(api_key)) as client:
             if provider_type == "ollama":
                 r = client.get(f"{base_url}/api/tags")
                 r.raise_for_status()
@@ -86,11 +107,11 @@ def select_provider() -> dict:
         print("Geçersiz seçim.")
 
 
-def select_model(base_url: str, provider_type: str) -> tuple[str, int]:
-    print_step(2, 4, "Model Seçimi")
+def select_model(base_url: str, provider_type: str, api_key: str | None = None) -> tuple[str, int]:
+    print_step(3, 6, "Model Seçimi")
     print(f"Bağlanılıyor: {base_url} ...\n")
 
-    models = fetch_models(base_url, provider_type)
+    models = fetch_models(base_url, provider_type, api_key)
 
     if not models:
         print("⚠️  Model bulunamadı. Manuel girilecek.")
@@ -234,7 +255,9 @@ def start_server(provider: dict, model: str, port: int, context_length: int) -> 
         return None
 
 
-def validate_connection(base_url: str, provider_type: str, model: str) -> bool:
+def validate_connection(
+    base_url: str, provider_type: str, model: str, api_key: str | None = None
+) -> bool:
     """Test the connection with a sample JEV request."""
     print("\nBağlantı test ediliyor...")
 
@@ -250,7 +273,7 @@ def validate_connection(base_url: str, provider_type: str, model: str) -> bool:
     }
 
     try:
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=30.0, headers=auth_headers(api_key)) as client:
             if provider_type == "ollama":
                 test_payload = {
                     "model": model,
@@ -274,9 +297,17 @@ def validate_connection(base_url: str, provider_type: str, model: str) -> bool:
         return False
 
 
-def save_config(provider: dict, model: str, port: int, base_url: str, context_length: int):
-    """Save config to ~/.config/jev-local/config.json"""
-    config_dir = Path.home() / ".config" / "jev-local"
+def save_config(
+    provider: dict,
+    model: str,
+    port: int,
+    base_url: str,
+    context_length: int,
+    api_key: str | None,
+    config_dir: Path | None = None,
+) -> Path:
+    """Save config with user-only permissions."""
+    config_dir = config_dir or (Path.home() / ".config" / "jev-local")
     config_dir.mkdir(parents=True, exist_ok=True)
 
     config = {
@@ -287,11 +318,14 @@ def save_config(provider: dict, model: str, port: int, base_url: str, context_le
         "context_length": context_length,
         "base_url": base_url,
         "endpoint": f"{base_url}/v1" if provider["type"] == "openai" else base_url,
+        "api_key": api_key,
     }
 
     config_file = config_dir / "config.json"
     config_file.write_text(json.dumps(config, indent=2))
+    config_file.chmod(0o600)
     print(f"\n💾 Yapılandırma kaydedildi: {config_file}")
+    return config_file
 
 
 def print_usage(base_url: str, provider_type: str, model: str, context_length: int):
@@ -326,23 +360,26 @@ def main():
     port = select_port(provider["default_port"])
     base_url = f"http://localhost:{port}"
 
-    # Step 3: Model (need base_url for fetching)
-    model, context_length = select_model(base_url, provider["type"])
+    # Step 3: Optional API key (local providers usually do not need one)
+    api_key = ask_api_key()
 
-    # Step 4: Start server (if needed)
+    # Step 4: Model (need base_url and optional auth for fetching)
+    model, context_length = select_model(base_url, provider["type"], api_key)
+
+    # Step 5: Start server (if needed)
     server_proc = start_server(provider, model, port, context_length)
 
-    # Step 5: Validate
-    if not validate_connection(base_url, provider["type"], model):
+    # Step 6: Validate
+    if not validate_connection(base_url, provider["type"], model, api_key):
         print("\n❌ Kurulum başarısız. Manuel kontrol edin.")
         if server_proc:
             server_proc.terminate()
         sys.exit(1)
 
-    # Step 6: Save config
-    save_config(provider, model, port, base_url, context_length)
+    # Step 7: Save config
+    save_config(provider, model, port, base_url, context_length, api_key)
 
-    # Step 7: Show usage
+    # Step 8: Show usage
     print_usage(base_url, provider["type"], model, context_length)
 
     # Keep server alive if we started it
