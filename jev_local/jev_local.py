@@ -108,8 +108,8 @@ class JEVLocal:
         # Ollama default port
         if ":11434" in self.endpoint:
             return "ollama"
-        # vLLM/llama.cpp default port
-        if ":8080" in self.endpoint or ":8000" in self.endpoint:
+        # vLLM/llama.cpp/LM Studio default ports
+        if any(port in self.endpoint for port in (":8080", ":8000", ":1234")):
             return "openai"
         try:
             r = self._client.get(f"{self.endpoint}/v1/models", timeout=2.0)
