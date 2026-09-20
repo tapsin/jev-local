@@ -16,6 +16,7 @@ dev = ["pytest", "ruff"]
 [project.scripts]
 jev-local = "jev_local.jev_local:main"
 jev-setup = "jev_local.setup_wizard:main"
+jev-server = "jev_local.gateway:main"
 
 [build-system]
 requires = ["setuptools>=68"]

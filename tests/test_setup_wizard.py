@@ -43,12 +43,19 @@ def test_save_config_persists_key_and_restricts_permissions(tmp_path):
     assert config_file.stat().st_mode & 0o777 == 0o600
 
 
-def test_load_lm_studio_model_calls_native_load_endpoint():
-    response = type("Response", (), {"raise_for_status": lambda self: None})()
+def test_load_lm_studio_model_returns_loaded_instance_id():
+    response = type(
+        "Response",
+        (),
+        {
+            "raise_for_status": lambda self: None,
+            "json": lambda self: {"status": "loaded", "instance_id": "ornith-instance"},
+        },
+    )()
     with patch("jev_local.setup_wizard.httpx.post", return_value=response) as post:
         assert load_lm_studio_model(
             "http://localhost:1234", "ornith", 262144, "secret-key"
-        )
+        ) == "ornith-instance"
 
     post.assert_called_once_with(
         "http://localhost:1234/api/v1/models/load",
@@ -67,4 +74,31 @@ def test_load_lm_studio_model_returns_false_on_http_error():
         "jev_local.setup_wizard.httpx.post",
         side_effect=RuntimeError("load failed"),
     ):
-        assert not load_lm_studio_model("http://localhost:1234", "ornith", 4096, None)
+        assert load_lm_studio_model("http://localhost:1234", "ornith", 4096, None) is None
+
+
+def test_validate_connection_uses_loaded_instance_id():
+    response = type(
+        "Response",
+        (),
+        {"status_code": 200, "raise_for_status": lambda self: None},
+    )()
+    client = type(
+        "Client",
+        (),
+        {
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *args: None,
+            "post": lambda self, url, json: response,
+        },
+    )()
+    with patch("jev_local.setup_wizard.httpx.Client", return_value=client), patch.object(
+        client, "post", wraps=client.post
+    ) as post:
+        from jev_local.setup_wizard import validate_connection
+
+        assert validate_connection(
+            "http://localhost:1234", "openai", "ornith-instance", "secret-key"
+        )
+
+    assert post.call_args.kwargs["json"]["model"] == "ornith-instance"

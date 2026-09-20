@@ -10,6 +10,7 @@ JEV-Local Interactive Setup Wizard
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -161,6 +162,88 @@ def select_context_length(default_ctx: int) -> int:
         print("Geçersiz değer. 512-2000000 arası girin.")
 
 
+def select_jev_port(default_port: int = 3030) -> int:
+    """Select the local OpenAI-compatible JEV gateway port."""
+    while True:
+        value = input(f"JEV OpenAI REST API portu [{default_port}]: ").strip()
+        if not value:
+            return default_port
+        try:
+            port = int(value)
+            if 1 <= port <= 65535:
+                return port
+        except ValueError:
+            pass
+        print("Geçersiz port. 1-65535 arası bir sayı girin.")
+
+
+def is_port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def ensure_port_available(port: int) -> None:
+    """Stop our old gateway, but never kill an unrelated process."""
+    if not is_port_in_use(port):
+        return
+    print(f"⚠️  {port} portu kullanımda; eski JEV servisi durduruluyor.")
+    subprocess.run(
+        ["systemctl", "--user", "stop", "jev-local.service"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    time.sleep(1)
+    if is_port_in_use(port):
+        raise RuntimeError(f"{port} portunu başka bir süreç kullanıyor; farklı port seçin.")
+
+
+def install_gateway_service(port: int) -> Path:
+    """Install and start a systemd user service for the JEV gateway."""
+    ensure_port_available(port)
+    unit_dir = Path.home() / ".config" / "systemd" / "user"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    unit_file = unit_dir / "jev-local.service"
+    executable = Path(sys.executable)
+    unit_file.write_text(
+        "\n".join(
+            [
+                "[Unit]",
+                "Description=JEV-Local OpenAI-compatible REST API",
+                "After=network.target",
+                "",
+                "[Service]",
+                "Type=simple",
+                f"ExecStart={executable} -m jev_local.gateway --host 127.0.0.1 --port {port}",
+                "Restart=on-failure",
+                "RestartSec=2",
+                "",
+                "[Install]",
+                "WantedBy=default.target",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    subprocess.run(
+        ["systemctl", "--user", "enable", "--now", "jev-local.service"], check=True
+    )
+    return unit_file
+
+
+def wait_for_gateway(port: int, timeout: float = 20.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if httpx.get(f"http://127.0.0.1:{port}/health", timeout=1.0).status_code == 200:
+                return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False
+
+
 def select_port(default_port: int) -> int:
     print_step(3, 4, "Port Seçimi")
     port_input = input(f"Port [{default_port}]: ").strip()
@@ -181,8 +264,8 @@ def load_lm_studio_model(
     model: str,
     context_length: int,
     api_key: str | None,
-) -> bool:
-    """Load the selected LM Studio model through its native REST API."""
+) -> str | None:
+    """Load an LM Studio model and return its inference instance ID."""
     try:
         response = httpx.post(
             f"{base_url}/api/v1/models/load",
@@ -195,11 +278,12 @@ def load_lm_studio_model(
             timeout=300.0,
         )
         response.raise_for_status()
-        print("✅ Model LM Studio belleğine yüklendi.")
-        return True
+        instance_id = response.json().get("instance_id") or model
+        print(f"✅ Model LM Studio belleğine yüklendi: {instance_id}")
+        return instance_id
     except Exception as exc:
         print(f"❌ LM Studio modeli yüklenemedi: {exc}")
-        return False
+        return None
 
 
 def start_server(
@@ -208,8 +292,8 @@ def start_server(
     port: int,
     context_length: int,
     api_key: str | None = None,
-) -> subprocess.Popen | None:
-    """Start or prepare the inference server based on provider."""
+) -> tuple[subprocess.Popen | None, str]:
+    """Start/prepare inference and return process plus active model ID."""
     print_step(4, 5, "Sunucu Başlatılıyor")
 
     if provider["name"] == "LM Studio":
@@ -217,17 +301,17 @@ def start_server(
         print(f"LM Studio API: {base_url}")
         print(f"Model yükleniyor: {model}")
         print(f"Context length: {context_length}")
-        if not load_lm_studio_model(base_url, model, context_length, api_key):
+        instance_id = load_lm_studio_model(base_url, model, context_length, api_key)
+        if not instance_id:
             raise RuntimeError(
                 "LM Studio modeli aktif edilemedi. API sunucusunu, anahtarı ve belleği kontrol edin."
             )
-        return None
+        return None, instance_id
 
     elif provider["name"] == "Ollama":
         print("Ollama zaten servis olarak çalışıyor olmalı.")
         print(f"   Kontrol: curl http://localhost:{port}/api/tags")
-        input("   Devam etmek için Enter...")
-        return None
+        return None, model
 
     else:  # llama.cpp / vLLM / custom
         # Try to find model file
@@ -249,7 +333,7 @@ def start_server(
             print("   llama.cpp için .gguf dosyası gerekiyor.")
             custom_path = input("   Model dosyası yolu (boş = iptal): ").strip()
             if not custom_path:
-                return None
+                raise RuntimeError("Model dosyası seçilmedi.")
             model_file = Path(custom_path)
 
         print(f"Model dosyası: {model_file}")
@@ -282,13 +366,13 @@ def start_server(
                     r = client.get(f"http://localhost:{port}/health")
                     if r.status_code == 200:
                         print("✅ Hazır!")
-                        return proc
+                        return proc, model
             except Exception:
                 print(".", end="", flush=True)
 
         print("\n❌ Sunucu zaman aşımına uğradı.")
         proc.terminate()
-        return None
+        raise RuntimeError("Sunucu zaman aşımına uğradı.")
 
 
 def validate_connection(
@@ -340,6 +424,8 @@ def save_config(
     base_url: str,
     context_length: int,
     api_key: str | None,
+    gateway_port: int = 3030,
+    upstream_model: str | None = None,
     config_dir: Path | None = None,
 ) -> Path:
     """Save config with user-only permissions."""
@@ -350,7 +436,10 @@ def save_config(
         "provider": provider["name"],
         "provider_type": provider["type"],
         "model": model,
+        "upstream_model": upstream_model or model,
         "port": port,
+        "gateway_port": gateway_port,
+        "gateway_base_url": f"http://127.0.0.1:{gateway_port}/v1",
         "context_length": context_length,
         "base_url": base_url,
         "endpoint": f"{base_url}/v1" if provider["type"] == "openai" else base_url,
@@ -404,23 +493,51 @@ def main():
 
     # Step 5: Start server or load selected model (if needed)
     try:
-        server_proc = start_server(provider, model, port, context_length, api_key)
+        server_proc, active_model = start_server(
+            provider, model, port, context_length, api_key
+        )
     except RuntimeError as exc:
         print(f"\n❌ {exc}")
         sys.exit(1)
 
-    # Step 6: Validate
-    if not validate_connection(base_url, provider["type"], model, api_key):
+    # Step 6: Validate upstream
+    if not validate_connection(base_url, provider["type"], active_model, api_key):
         print("\n❌ Kurulum başarısız. Manuel kontrol edin.")
         if server_proc:
             server_proc.terminate()
         sys.exit(1)
 
     # Step 7: Save config
-    save_config(provider, model, port, base_url, context_length, api_key)
+    gateway_port = select_jev_port()
+    save_config(
+        provider,
+        model,
+        port,
+        base_url,
+        context_length,
+        api_key,
+        gateway_port=gateway_port,
+        upstream_model=active_model,
+    )
 
-    # Step 8: Show usage
-    print_usage(base_url, provider["type"], model, context_length)
+    # Step 8: Install and verify the local OpenAI REST gateway
+    try:
+        install_gateway_service(gateway_port)
+    except (RuntimeError, subprocess.CalledProcessError) as exc:
+        print(f"\n❌ JEV REST API servisi kurulamadı: {exc}")
+        sys.exit(1)
+    if not wait_for_gateway(gateway_port):
+        print("\n❌ JEV REST API servisi başlatılamadı.")
+        print("Log: journalctl --user -u jev-local.service -n 100")
+        sys.exit(1)
+
+    print("\n✅ JEV-Local OpenAI REST API aktif")
+    print(f"   Base URL: http://127.0.0.1:{gateway_port}/v1")
+    print("   Model: jev-local")
+    print(f"   Health: http://127.0.0.1:{gateway_port}/health")
+
+    # Step 9: Show usage
+    print_usage(f"http://127.0.0.1:{gateway_port}", "openai", "jev-local", context_length)
 
     # Keep server alive if we started it
     if server_proc:

@@ -10,6 +10,8 @@ A lightweight Python library that mimics **TypefAI's JEV (Journal Entry Voucher 
 
 | Feature | Description |
 |---------|-------------|
+| **OpenAI REST Gateway** | Editörler ve ajanlar için `jev-local` modelini `/v1/models` ve `/v1/chat/completions` üzerinden sunar |
+| **Custom Local Port** | `jev-setup`, JEV API portunu sorar ve systemd kullanıcı servisini otomatik kurar |
 | **Structured Output Only** | Returns JSON: `{choice, probabilities, confidence}` — no explanations |
 | **Multiple Question Types** | `choice` (pick one), `score` (0-10), `noul` (yes/no gate) |
 | **Parallel Questions** | Ask multiple questions in a single LLM call |
@@ -31,6 +33,39 @@ pip install httpx pydantic --break-system-packages
 ### Run llama.cpp server (GPU recommended)
 ```bash
 llama-server -m qwen2.5-coder-7b-instruct-q4_k_m.gguf -c 4096 -ngl 99 --port 8080
+```
+
+### OpenAI-compatible REST API (editör/ajan bağlantısı)
+
+`jev-setup` sonunda ayrı bir JEV portu sorar (varsayılan `3030`) ve kullanıcı oturumunda otomatik başlayan `jev-local.service` servisini kurar.
+
+```text
+Provider: OpenAI Compatible
+Base URL: http://127.0.0.1:3030/v1
+Model: jev-local
+API Key: boş veya herhangi bir yerel değer
+```
+
+Kontrol:
+
+```bash
+curl http://127.0.0.1:3030/health
+curl http://127.0.0.1:3030/v1/models
+curl http://127.0.0.1:3030/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model":"jev-local",
+    "messages":[{"role":"user","content":"Yalnızca A veya B arasından seç. A: devam et, B: dur"}],
+    "temperature":0.1
+  }'
+```
+
+Servis yönetimi:
+
+```bash
+systemctl --user status jev-local.service
+systemctl --user restart jev-local.service
+journalctl --user -u jev-local.service -f
 ```
 
 ### Use as CLI
