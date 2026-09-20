@@ -49,12 +49,24 @@ def fetch_models(base_url: str, provider_type: str) -> list[dict]:
                 r = client.get(f"{base_url}/api/tags")
                 r.raise_for_status()
                 data = r.json()
-                return [{"name": m["name"], "size": m.get("size", 0)} for m in data.get("models", [])]
+                return [
+                    {
+                        "name": m["name"],
+                        "size": m.get("size", 0),
+                        "context_length": m.get("details", {}).get("context_length", 4096),
+                    }
+                    for m in data.get("models", [])
+                ]
             else:
                 r = client.get(f"{base_url}/v1/models")
                 r.raise_for_status()
                 data = r.json()
-                return [{"name": m["id"], "size": 0} for m in data.get("data", [])]
+                models = []
+                for m in data.get("data", []):
+                    # LM Studio returns context_length in some cases
+                    ctx = m.get("context_length", m.get("max_context_length", 4096))
+                    models.append({"name": m["id"], "size": 0, "context_length": ctx})
+                return models
     except Exception as e:
         print(f"❌ Model alınamadı: {e}")
         return []
@@ -74,7 +86,7 @@ def select_provider() -> dict:
         print("Geçersiz seçim.")
 
 
-def select_model(base_url: str, provider_type: str) -> str:
+def select_model(base_url: str, provider_type: str) -> tuple[str, int]:
     print_step(2, 4, "Model Seçimi")
     print(f"Bağlanılıyor: {base_url} ...\n")
 
@@ -82,24 +94,50 @@ def select_model(base_url: str, provider_type: str) -> str:
 
     if not models:
         print("⚠️  Model bulunamadı. Manuel girilecek.")
-        return input("Model adı (örn: qwen2.5-coder-7b-instruct): ").strip()
+        model = input("Model adı (örn: qwen2.5-coder-7b-instruct): ").strip()
+        return model, select_context_length(4096)
 
     print("Mevcut modeller:\n")
     for i, m in enumerate(models, 1):
         size_gb = m.get("size", 0) / (1024**3)
         size_str = f" ({size_gb:.1f} GB)" if size_gb > 0 else ""
-        print(f"  {i}) {m['name']}{size_str}")
+        ctx = m.get("context_length", 4096)
+        ctx_str = f" | Context: {ctx}" if ctx else ""
+        print(f"  {i}) {m['name']}{size_str}{ctx_str}")
 
     print()
     while True:
         choice = input(f"Seçim [1-{len(models)}] veya 'm' (manuel): ").strip()
         if choice.lower() == "m":
-            return input("Model adı: ").strip()
+            model = input("Model adı: ").strip()
+            return model, select_context_length(4096)
         if choice.isdigit():
             idx = int(choice) - 1
             if 0 <= idx < len(models):
-                return models[idx]["name"]
+                model = models[idx]["name"]
+                default_ctx = models[idx].get("context_length", 4096)
+                return model, select_context_length(default_ctx)
         print("Geçersiz seçim.")
+
+
+def select_context_length(default_ctx: int) -> int:
+    """Ask user for context length."""
+    print_step(3, 5, "Context Length (Bağlam Uzunluğu)")
+    print(f"Modelin desteklediği context length: {default_ctx}")
+    print("Daha yüksek = daha uzun konuşma/bağlam, daha fazla VRAM/RAM")
+    print(f"Önerilen aralık: 2048 - 131072 (model limitine bağlı)\n")
+
+    while True:
+        ctx_input = input(f"Context length [{default_ctx}]: ").strip()
+        if not ctx_input:
+            return default_ctx
+        try:
+            ctx = int(ctx_input)
+            if 512 <= ctx <= 2000000:
+                return ctx
+        except ValueError:
+            pass
+        print("Geçersiz değer. 512-2000000 arası girin.")
 
 
 def select_port(default_port: int) -> int:
@@ -117,13 +155,14 @@ def select_port(default_port: int) -> int:
     return default_port
 
 
-def start_server(provider: dict, model: str, port: int) -> subprocess.Popen | None:
+def start_server(provider: dict, model: str, port: int, context_length: int) -> subprocess.Popen | None:
     """Start the inference server based on provider."""
-    print_step(4, 4, "Sunucu Başlatılıyor")
+    print_step(4, 5, "Sunucu Başlatılıyor")
 
     if provider["name"] == "LM Studio":
         print("⚠️  LM Studio sunucusu LM Studio arayüzünden başlatılmalıdır.")
         print(f"   LM Studio → Developer → Start Server (Port: {port})")
+        print(f"   Context length: {context_length} (LM Studio ayarlarından da ayarlayın)")
         input("   Sunucu başladıysa Enter'a basın...")
         return None
 
@@ -158,13 +197,14 @@ def start_server(provider: dict, model: str, port: int) -> subprocess.Popen | No
 
         print(f"Model dosyası: {model_file}")
         print(f"Port: {port}")
+        print(f"Context length: {context_length}")
         print("Başlatılıyor (GPU offload: -ngl 99)...\n")
 
         # Start llama-server in background
         cmd = [
             "llama-server",
             "-m", str(model_file),
-            "-c", "4096",
+            "-c", str(context_length),
             "-ngl", "99",
             "--port", str(port),
             "--host", "0.0.0.0",
@@ -234,7 +274,7 @@ def validate_connection(base_url: str, provider_type: str, model: str) -> bool:
         return False
 
 
-def save_config(provider: dict, model: str, port: int, base_url: str):
+def save_config(provider: dict, model: str, port: int, base_url: str, context_length: int):
     """Save config to ~/.config/jev-local/config.json"""
     config_dir = Path.home() / ".config" / "jev-local"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -244,6 +284,7 @@ def save_config(provider: dict, model: str, port: int, base_url: str):
         "provider_type": provider["type"],
         "model": model,
         "port": port,
+        "context_length": context_length,
         "base_url": base_url,
         "endpoint": f"{base_url}/v1" if provider["type"] == "openai" else base_url,
     }
@@ -253,7 +294,7 @@ def save_config(provider: dict, model: str, port: int, base_url: str):
     print(f"\n💾 Yapılandırma kaydedildi: {config_file}")
 
 
-def print_usage(base_url: str, provider_type: str, model: str):
+def print_usage(base_url: str, provider_type: str, model: str, context_length: int):
     print_header("Kullanım")
     print("CLI:")
     print(f"  python3 -m jev_local.jev_local \\")
@@ -270,6 +311,7 @@ def print_usage(base_url: str, provider_type: str, model: str):
     print(f'      endpoint="{base_url}",')
     print(f'      model="{model}"')
     print(f"  )")
+    print(f"\n⚙️  Context length: {context_length}")
     print(f"\n📖 Docs: https://github.com/tapsin/jev-local")
 
 
@@ -285,10 +327,10 @@ def main():
     base_url = f"http://localhost:{port}"
 
     # Step 3: Model (need base_url for fetching)
-    model = select_model(base_url, provider["type"])
+    model, context_length = select_model(base_url, provider["type"])
 
     # Step 4: Start server (if needed)
-    server_proc = start_server(provider, model, port)
+    server_proc = start_server(provider, model, port, context_length)
 
     # Step 5: Validate
     if not validate_connection(base_url, provider["type"], model):
@@ -298,10 +340,10 @@ def main():
         sys.exit(1)
 
     # Step 6: Save config
-    save_config(provider, model, port, base_url)
+    save_config(provider, model, port, base_url, context_length)
 
     # Step 7: Show usage
-    print_usage(base_url, provider["type"], model)
+    print_usage(base_url, provider["type"], model, context_length)
 
     # Keep server alive if we started it
     if server_proc:
