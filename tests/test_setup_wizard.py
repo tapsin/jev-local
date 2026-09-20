@@ -77,28 +77,35 @@ def test_load_lm_studio_model_returns_false_on_http_error():
         assert load_lm_studio_model("http://localhost:1234", "ornith", 4096, None) is None
 
 
-def test_validate_connection_uses_loaded_instance_id():
-    response = type(
-        "Response",
-        (),
-        {"status_code": 200, "raise_for_status": lambda self: None},
-    )()
+def test_validate_connection_retries_without_response_format_and_sends_api_key():
+    from jev_local.setup_wizard import validate_connection
+
+    bad = type("Response", (), {"status_code": 400, "text": "unsupported response_format"})()
+    good = type("Response", (), {"status_code": 200, "text": "ok"})()
     client = type(
         "Client",
         (),
         {
             "__enter__": lambda self: self,
             "__exit__": lambda self, *args: None,
-            "post": lambda self, url, json: response,
+            "post": lambda self, url, json: [bad, good].pop(0),
         },
     )()
-    with patch("jev_local.setup_wizard.httpx.Client", return_value=client), patch.object(
-        client, "post", wraps=client.post
-    ) as post:
-        from jev_local.setup_wizard import validate_connection
+    responses = [bad, good]
+    client.post = lambda url, json: responses.pop(0)
 
+    with patch("jev_local.setup_wizard.httpx.Client", return_value=client) as client_factory, patch(
+        "jev_local.setup_wizard.time.sleep"
+    ), patch.object(client, "post", wraps=client.post) as post:
         assert validate_connection(
             "http://localhost:1234", "openai", "ornith-instance", "secret-key"
         )
 
-    assert post.call_args.kwargs["json"]["model"] == "ornith-instance"
+    client_factory.assert_called_once_with(
+        timeout=60.0,
+        headers={"Authorization": "Bearer secret-key"},
+    )
+    assert post.call_count == 2
+    assert post.call_args_list[0].kwargs["json"]["model"] == "ornith-instance"
+    assert "response_format" in post.call_args_list[0].kwargs["json"]
+    assert "response_format" not in post.call_args_list[1].kwargs["json"]

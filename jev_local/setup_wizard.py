@@ -376,45 +376,68 @@ def start_server(
 
 
 def validate_connection(
-    base_url: str, provider_type: str, model: str, api_key: str | None = None
+    base_url: str,
+    provider_type: str,
+    model: str,
+    api_key: str | None = None,
+    attempts: int = 4,
 ) -> bool:
-    """Test the connection with a sample JEV request."""
+    """Test inference, retrying while a freshly loaded model becomes ready."""
     print("\nBağlantı test ediliyor...")
 
-    test_payload = {
+    openai_payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "Output only JSON: {\"answers\": {\"test\": {\"choice\": \"A\", \"probabilities\": {\"A\": 1.0}, \"confidence\": 1.0}}}"},
-            {"role": "user", "content": "Test"},
+            {"role": "system", "content": "Return only valid JSON."},
+            {"role": "user", "content": '{"test":"A"}'},
         ],
         "temperature": 0.1,
         "max_tokens": 32,
+        "stream": False,
         "response_format": {"type": "json_object"},
     }
 
     try:
-        with httpx.Client(timeout=30.0, headers=auth_headers(api_key)) as client:
-            if provider_type == "ollama":
-                test_payload = {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": "Output only JSON: {\"answers\": {\"test\": {\"choice\": \"A\", \"probabilities\": {\"A\": 1.0}, \"confidence\": 1.0}}}"},
-                        {"role": "user", "content": "Test"},
-                    ],
-                    "options": {"temperature": 0.1, "num_predict": 32},
-                    "format": "json",
-                    "stream": False,
-                }
-                r = client.post(f"{base_url}/api/chat", json=test_payload)
-            else:
-                r = client.post(f"{base_url}/v1/chat/completions", json=test_payload)
+        with httpx.Client(timeout=60.0, headers=auth_headers(api_key)) as client:
+            for attempt in range(1, attempts + 1):
+                if provider_type == "ollama":
+                    payload = {
+                        "model": model,
+                        "messages": openai_payload["messages"],
+                        "options": {"temperature": 0.1, "num_predict": 32},
+                        "format": "json",
+                        "stream": False,
+                    }
+                    response = client.post(f"{base_url}/api/chat", json=payload)
+                else:
+                    response = client.post(
+                        f"{base_url}/v1/chat/completions", json=dict(openai_payload)
+                    )
 
-            r.raise_for_status()
-            print("✅ Bağlantı başarılı! JEV-Local kullanıma hazır.")
-            return True
-    except Exception as e:
-        print(f"❌ Test başarısız: {e}")
+                if 200 <= response.status_code < 300:
+                    print("✅ Bağlantı başarılı! JEV-Local kullanıma hazır.")
+                    return True
+
+                # Some OpenAI-compatible servers reject response_format even
+                # though normal chat completions work. Retry without it.
+                if response.status_code == 400 and "response_format" in openai_payload:
+                    print("⚠️  JSON response_format desteklenmiyor; sade istek deneniyor.")
+                    openai_payload.pop("response_format", None)
+                else:
+                    detail = response.text[:500].replace("\n", " ")
+                    print(
+                        f"⚠️  Deneme {attempt}/{attempts} başarısız "
+                        f"(HTTP {response.status_code}): {detail}"
+                    )
+
+                if attempt < attempts:
+                    time.sleep(2)
+    except Exception as exc:
+        print(f"❌ Test bağlantı hatası: {exc}")
         return False
+
+    print("❌ Model yüklendi ancak inference testi başarılı olmadı.")
+    return False
 
 
 def save_config(
