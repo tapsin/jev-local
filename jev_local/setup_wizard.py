@@ -176,15 +176,51 @@ def select_port(default_port: int) -> int:
     return default_port
 
 
-def start_server(provider: dict, model: str, port: int, context_length: int) -> subprocess.Popen | None:
-    """Start the inference server based on provider."""
+def load_lm_studio_model(
+    base_url: str,
+    model: str,
+    context_length: int,
+    api_key: str | None,
+) -> bool:
+    """Load the selected LM Studio model through its native REST API."""
+    try:
+        response = httpx.post(
+            f"{base_url}/api/v1/models/load",
+            headers=auth_headers(api_key),
+            json={
+                "model": model,
+                "context_length": context_length,
+                "echo_load_config": True,
+            },
+            timeout=300.0,
+        )
+        response.raise_for_status()
+        print("✅ Model LM Studio belleğine yüklendi.")
+        return True
+    except Exception as exc:
+        print(f"❌ LM Studio modeli yüklenemedi: {exc}")
+        return False
+
+
+def start_server(
+    provider: dict,
+    model: str,
+    port: int,
+    context_length: int,
+    api_key: str | None = None,
+) -> subprocess.Popen | None:
+    """Start or prepare the inference server based on provider."""
     print_step(4, 5, "Sunucu Başlatılıyor")
 
     if provider["name"] == "LM Studio":
-        print("⚠️  LM Studio sunucusu LM Studio arayüzünden başlatılmalıdır.")
-        print(f"   LM Studio → Developer → Start Server (Port: {port})")
-        print(f"   Context length: {context_length} (LM Studio ayarlarından da ayarlayın)")
-        input("   Sunucu başladıysa Enter'a basın...")
+        base_url = f"http://localhost:{port}"
+        print(f"LM Studio API: {base_url}")
+        print(f"Model yükleniyor: {model}")
+        print(f"Context length: {context_length}")
+        if not load_lm_studio_model(base_url, model, context_length, api_key):
+            raise RuntimeError(
+                "LM Studio modeli aktif edilemedi. API sunucusunu, anahtarı ve belleği kontrol edin."
+            )
         return None
 
     elif provider["name"] == "Ollama":
@@ -366,8 +402,12 @@ def main():
     # Step 4: Model (need base_url and optional auth for fetching)
     model, context_length = select_model(base_url, provider["type"], api_key)
 
-    # Step 5: Start server (if needed)
-    server_proc = start_server(provider, model, port, context_length)
+    # Step 5: Start server or load selected model (if needed)
+    try:
+        server_proc = start_server(provider, model, port, context_length, api_key)
+    except RuntimeError as exc:
+        print(f"\n❌ {exc}")
+        sys.exit(1)
 
     # Step 6: Validate
     if not validate_connection(base_url, provider["type"], model, api_key):
