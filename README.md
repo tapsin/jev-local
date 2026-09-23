@@ -235,3 +235,11 @@ MIT — Use freely, modify, distribute.
 - **TypefAI** — Original JEV / System-1 architecture
 - **llama.cpp / vLLM / Ollama** — Local inference backends
 - **Nous Research** — Hermes agent ecosystem inspiration
+# DONATE:
+
+<table border="1">
+<tr><td>USDT TRC20</td><td><code>TYCK6ZyMS6UDt787foPH2QwFuvkdqMw1Jv</code></td></tr>
+<tr><td>USDT BSC20</td><td><code>0x15aac92a1945ddbe5c79304bfa388d6be99b26a3</code></td></tr>
+</table>
+
+Created by TAPSIN
